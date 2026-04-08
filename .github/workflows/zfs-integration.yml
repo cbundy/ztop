@@ -18,5 +18,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run ZFS integration tests in Docker
-        run: bash scripts/run-integration-tests.sh
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zfsutils-linux build-essential
+          sudo modprobe zfs
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run ZFS integration tests
+        run: sudo bash scripts/integration-test-entrypoint.sh
