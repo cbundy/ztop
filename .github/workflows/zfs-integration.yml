@@ -58,16 +58,6 @@ jobs:
             sudo cat "$f"
           done
 
-      - name: Generate baseline I/O on the dataset
-        run: |
-          set -euo pipefail
-          dd if=/dev/urandom of=/ztoptest/data/file bs=1M count=8 conv=fsync
-          dd if=/ztoptest/data/file of=/dev/null bs=1M
-          # Bump unlink counter
-          touch /ztoptest/data/scratch
-          rm /ztoptest/data/scratch
-          sync
-
       - name: Start ztop-exporter in background
         run: |
           set -euo pipefail
@@ -75,26 +65,80 @@ jobs:
             > /tmp/exporter.log 2>&1 & echo $! > /tmp/exporter.pid'
           # Give the exporter a moment to bind and take its first snapshot.
           sleep 2
+          curl -fsS --retry 10 --retry-delay 1 --retry-connrefused \
+            http://127.0.0.1:9901/metrics > /dev/null
 
-      - name: Drive more I/O while exporter is running
+      - name: Drive I/O and poll /metrics until non-zero writes are observed
         run: |
           set -euo pipefail
-          dd if=/dev/urandom of=/ztoptest/data/file2 bs=1M count=4 conv=fsync
-          dd if=/ztoptest/data/file2 of=/dev/null bs=1M
-          # Wait long enough for the exporter's 1s refresh interval to roll
-          # over and produce a non-zero delta.
-          sleep 3
 
-      - name: Scrape /metrics and validate
+          # Run a continuous writer in the background for the duration of
+          # the poll. With a 1s refresh interval the exporter only ever
+          # reports the most recent 1s delta, and ZFS buffers writes across
+          # txg boundaries (default 5s), so a single pre-scrape dd is not
+          # enough: we need I/O happening *during* the poll window.
+          (
+            set +e
+            i=0
+            while [ "$i" -lt 60 ]; do
+              dd if=/dev/urandom of="/ztoptest/data/file.$i" \
+                bs=1M count=2 conv=fsync oflag=sync 2>/dev/null
+              dd if="/ztoptest/data/file.$i" of=/dev/null bs=1M 2>/dev/null
+              rm -f "/ztoptest/data/file.$i"
+              i=$((i + 1))
+            done
+          ) &
+          WRITER_PID=$!
+          echo "writer pid: $WRITER_PID"
+
+          # Poll /metrics until we see non-zero write bytes for ztoptest/data,
+          # or give up after ~30s. Retain the last response body for the
+          # subsequent assertion step.
+          found=""
+          for attempt in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:9901/metrics > /tmp/metrics.txt || {
+              sleep 1
+              continue
+            }
+            if awk '
+              /^zfs_dataset_write_bytes_per_second\{dataset="ztoptest\/data"\}/ {
+                if ($2+0 > 0) { exit 0 }
+              }
+              END { exit 1 }
+            ' /tmp/metrics.txt; then
+              found="yes"
+              echo "attempt $attempt: observed non-zero write bytes"
+              break
+            fi
+            echo "attempt $attempt: still zero, retrying"
+            sleep 1
+          done
+
+          # Stop the writer regardless of outcome.
+          kill "$WRITER_PID" 2>/dev/null || true
+          wait "$WRITER_PID" 2>/dev/null || true
+
+          if [ -z "$found" ]; then
+            echo "ERROR: never observed non-zero write bytes for ztoptest/data"
+            echo "--- last /metrics response ---"
+            cat /tmp/metrics.txt || true
+            echo "--- /proc/spl/kstat/zfs/ztoptest ---"
+            sudo ls -la /proc/spl/kstat/zfs/ztoptest/ || true
+            for f in /proc/spl/kstat/zfs/ztoptest/objset-*; do
+              echo "=== $f ==="
+              sudo cat "$f" || true
+            done
+            exit 1
+          fi
+
+      - name: Validate /metrics shape
         run: |
           set -euo pipefail
-          curl -fsS --retry 5 --retry-delay 1 --retry-connrefused \
-            http://127.0.0.1:9901/metrics | tee /tmp/metrics.txt
-
+          echo "--- /metrics ---"
+          cat /tmp/metrics.txt
           echo "--- assertions ---"
 
-          # Pool root dataset must appear (with -children off, only objset
-          # rows show up directly; the dataset child should always be there).
+          # Every dataset series must appear for ztoptest/data.
           grep -q 'zfs_dataset_read_ops_per_second{dataset="ztoptest/data"}' /tmp/metrics.txt
           grep -q 'zfs_dataset_write_ops_per_second{dataset="ztoptest/data"}' /tmp/metrics.txt
           grep -q 'zfs_dataset_read_bytes_per_second{dataset="ztoptest/data"}' /tmp/metrics.txt
@@ -107,19 +151,6 @@ jobs:
           # Prometheus header lines.
           grep -q '^# HELP zfs_dataset_read_bytes_per_second' /tmp/metrics.txt
           grep -q '^# TYPE zfs_dataset_read_bytes_per_second gauge' /tmp/metrics.txt
-
-          # At least one write-bytes line for ztoptest/data must be > 0.
-          # This proves the snapshot-diff path actually computes deltas
-          # against real /proc/spl/kstat data, not just zeros.
-          awk '
-            /^zfs_dataset_write_bytes_per_second\{dataset="ztoptest\/data"\}/ {
-              if ($2+0 > 0) { found=1 }
-            }
-            END { exit found ? 0 : 1 }
-          ' /tmp/metrics.txt || {
-            echo "ERROR: expected non-zero write bytes for ztoptest/data"
-            exit 1
-          }
 
       - name: Smoke-test ztop TUI binary against the live pool
         run: |
