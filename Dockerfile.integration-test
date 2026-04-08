@@ -1,0 +1,21 @@
+FROM ubuntu:24.04
+
+# Install ZFS userland tools and test utilities.
+# util-linux provides `script` for the TUI smoke test.
+RUN apt-get update && apt-get install -y \
+    zfsutils-linux \
+    curl \
+    util-linux \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust stable toolchain.
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable
+ENV PATH="/root/.cargo/bin:$PATH"
+
+WORKDIR /workspace
+
+COPY scripts/integration-test-entrypoint.sh /usr/local/bin/run-integration-tests
+RUN chmod +x /usr/local/bin/run-integration-tests
+
+ENTRYPOINT ["/usr/local/bin/run-integration-tests"]
