@@ -31,4 +31,4 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run ZFS integration tests
-        run: sudo -E bash scripts/integration-test-entrypoint.sh
+        run: sudo -E env "PATH=$PATH" bash scripts/integration-test-entrypoint.sh
