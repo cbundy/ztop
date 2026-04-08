@@ -23,8 +23,6 @@ RUN apk add --no-cache clang lld musl-dev git
 RUN --mount=type=bind,source=ztop-core,target=ztop-core \
     --mount=type=bind,source=ztop,target=ztop \
     --mount=type=bind,source=ztop-exporter,target=ztop-exporter \
-    --mount=type=bind,source=vendor,target=vendor \
-    --mount=type=bind,source=.cargo,target=.cargo \
     --mount=type=bind,source=Cargo.toml,target=Cargo.toml \
     --mount=type=bind,source=Cargo.lock,target=Cargo.lock \
     --mount=type=cache,target=/app/target/ \

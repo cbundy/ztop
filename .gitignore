@@ -1,4 +1,6 @@
 /target
+/.cargo
+/vendor
 **/*.rs.bk
 **/*.orig
 **/*.rej
