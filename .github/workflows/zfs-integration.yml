@@ -1,0 +1,158 @@
+name: ZFS Integration Test
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - "**"
+
+jobs:
+  zfs-e2e:
+    name: ZFS end-to-end (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ZFS userland and load module
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y zfsutils-linux
+          sudo modprobe zfs
+          zfs version
+          ls /proc/spl/kstat/zfs/
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        run: cargo build --release --all
+
+      - name: Run unit tests
+        run: cargo test --all
+
+      - name: Create test ZFS pool and dataset
+        run: |
+          set -euo pipefail
+          truncate -s 256M /tmp/ztoptest.img
+          sudo zpool create -f ztoptest /tmp/ztoptest.img
+          sudo zfs create ztoptest/data
+          sudo chown -R "$USER" /ztoptest /ztoptest/data
+          sudo zpool status ztoptest
+          sudo zfs list -r ztoptest
+
+      - name: Verify kstat objset files exist
+        run: |
+          set -euo pipefail
+          ls -la /proc/spl/kstat/zfs/ztoptest/
+          for f in /proc/spl/kstat/zfs/ztoptest/objset-*; do
+            echo "=== $f ==="
+            sudo cat "$f"
+          done
+
+      - name: Generate baseline I/O on the dataset
+        run: |
+          set -euo pipefail
+          dd if=/dev/urandom of=/ztoptest/data/file bs=1M count=8 conv=fsync
+          dd if=/ztoptest/data/file of=/dev/null bs=1M
+          # Bump unlink counter
+          touch /ztoptest/data/scratch
+          rm /ztoptest/data/scratch
+          sync
+
+      - name: Start ztop-exporter in background
+        run: |
+          set -euo pipefail
+          sudo -b sh -c './target/release/ztop-exporter -p 9901 -i 1 ztoptest \
+            > /tmp/exporter.log 2>&1 & echo $! > /tmp/exporter.pid'
+          # Give the exporter a moment to bind and take its first snapshot.
+          sleep 2
+
+      - name: Drive more I/O while exporter is running
+        run: |
+          set -euo pipefail
+          dd if=/dev/urandom of=/ztoptest/data/file2 bs=1M count=4 conv=fsync
+          dd if=/ztoptest/data/file2 of=/dev/null bs=1M
+          # Wait long enough for the exporter's 1s refresh interval to roll
+          # over and produce a non-zero delta.
+          sleep 3
+
+      - name: Scrape /metrics and validate
+        run: |
+          set -euo pipefail
+          curl -fsS --retry 5 --retry-delay 1 --retry-connrefused \
+            http://127.0.0.1:9901/metrics | tee /tmp/metrics.txt
+
+          echo "--- assertions ---"
+
+          # Pool root dataset must appear (with -children off, only objset
+          # rows show up directly; the dataset child should always be there).
+          grep -q 'zfs_dataset_read_ops_per_second{dataset="ztoptest/data"}' /tmp/metrics.txt
+          grep -q 'zfs_dataset_write_ops_per_second{dataset="ztoptest/data"}' /tmp/metrics.txt
+          grep -q 'zfs_dataset_read_bytes_per_second{dataset="ztoptest/data"}' /tmp/metrics.txt
+          grep -q 'zfs_dataset_write_bytes_per_second{dataset="ztoptest/data"}' /tmp/metrics.txt
+          grep -q 'zfs_dataset_unlink_ops_per_second{dataset="ztoptest/data"}' /tmp/metrics.txt
+
+          # The pool's own root objset (ztoptest) should also be reported.
+          grep -q 'zfs_dataset_read_ops_per_second{dataset="ztoptest"}' /tmp/metrics.txt
+
+          # Prometheus header lines.
+          grep -q '^# HELP zfs_dataset_read_bytes_per_second' /tmp/metrics.txt
+          grep -q '^# TYPE zfs_dataset_read_bytes_per_second gauge' /tmp/metrics.txt
+
+          # At least one write-bytes line for ztoptest/data must be > 0.
+          # This proves the snapshot-diff path actually computes deltas
+          # against real /proc/spl/kstat data, not just zeros.
+          awk '
+            /^zfs_dataset_write_bytes_per_second\{dataset="ztoptest\/data"\}/ {
+              if ($2+0 > 0) { found=1 }
+            }
+            END { exit found ? 0 : 1 }
+          ' /tmp/metrics.txt || {
+            echo "ERROR: expected non-zero write bytes for ztoptest/data"
+            exit 1
+          }
+
+      - name: Smoke-test ztop TUI binary against the live pool
+        run: |
+          set -euo pipefail
+          # Run the TUI under `script` so it gets a pty, with a 2s timeout.
+          # Exit code 124 from `timeout` means it ran for the full 2s without
+          # crashing, which is success for this smoke test.
+          set +e
+          sudo script -qc 'timeout 2 ./target/release/ztop ztoptest' /dev/null \
+            > /tmp/ztop.log 2>&1
+          rc=$?
+          set -e
+          echo "ztop exited with $rc"
+          if [ "$rc" -ne 124 ] && [ "$rc" -ne 143 ]; then
+            echo "ERROR: ztop did not run cleanly under timeout"
+            cat /tmp/ztop.log
+            exit 1
+          fi
+
+      - name: Show exporter log
+        if: always()
+        run: |
+          if [ -f /tmp/exporter.log ]; then
+            echo "--- ztop-exporter log ---"
+            cat /tmp/exporter.log
+          fi
+
+      - name: Cleanup
+        if: always()
+        run: |
+          set +e
+          if [ -f /tmp/exporter.pid ]; then
+            sudo kill "$(cat /tmp/exporter.pid)" 2>/dev/null || true
+          fi
+          sudo zpool destroy ztoptest 2>/dev/null || true
+          sudo rm -f /tmp/ztoptest.img
