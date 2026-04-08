@@ -1,0 +1,9 @@
+[package]
+name = "ztop-exporter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ztop-core = { path = "../ztop-core" }
+clap = { version = "4.5", features = ["derive"] }
+tiny_http = "0.12"

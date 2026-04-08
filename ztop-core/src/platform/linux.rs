@@ -12,7 +12,7 @@ use std::{
 
 use glob::{glob, Paths, Pattern};
 
-use super::Snapshot;
+use crate::snapshot::Snapshot;
 
 // Similar to sysctl::CtlValue, but only as many types as necessary.
 #[derive(Debug)]
@@ -87,7 +87,7 @@ impl TryFrom<&str> for Snapshot {
     }
 }
 
-pub(super) struct SnapshotIter {
+pub(crate) struct SnapshotIter {
     inner: Peekable<Flatten<Paths>>,
 }
 

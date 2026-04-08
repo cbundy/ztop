@@ -4,7 +4,7 @@ use std::{error::Error, mem};
 use cfg_if::cfg_if;
 use sysctl::{Ctl, CtlIter, CtlValue, Sysctl, SysctlError};
 
-use super::Snapshot;
+use crate::snapshot::Snapshot;
 
 cfg_if! {
     if #[cfg(debug_assertions)] {
@@ -94,7 +94,7 @@ impl Builder {
     }
 }
 
-pub(super) struct SnapshotIter {
+pub(crate) struct SnapshotIter {
     inner:    Box<dyn Iterator<Item = Result<(String, CtlValue), SysctlError>>>,
     finished: bool,
     builder:  Builder,

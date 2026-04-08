@@ -1,13 +1,11 @@
 # syntax=docker/dockerfile:1
 
 ARG RUST_VERSION=1.85.0
-ARG APP_NAME=ztop
 
 ################################################################################
 # Create a stage for building the application.
 
 FROM rust:${RUST_VERSION}-alpine AS build
-ARG APP_NAME
 WORKDIR /app
 
 # Install host build dependencies.
@@ -19,17 +17,20 @@ RUN apk add --no-cache clang lld musl-dev git
 # for git repository dependencies, and a cache mount to /app/target/ for
 # compiled dependencies which will speed up subsequent builds.
 
-# Leverage a bind mount to the src directory to avoid having to copy the
-# source code into the container. Once built, copy the executable to an
-# output directory before the cache mounted /app/target is unmounted.
-RUN --mount=type=bind,source=src,target=src \
+# Leverage a bind mount to the workspace source directories to avoid having to
+# copy the source code into the container. Once built, copy the executables to
+# an output directory before the cache mounted /app/target is unmounted.
+RUN --mount=type=bind,source=ztop-core,target=ztop-core \
+    --mount=type=bind,source=ztop,target=ztop \
+    --mount=type=bind,source=ztop-exporter,target=ztop-exporter \
     --mount=type=bind,source=Cargo.toml,target=Cargo.toml \
     --mount=type=bind,source=Cargo.lock,target=Cargo.lock \
     --mount=type=cache,target=/app/target/ \
     --mount=type=cache,target=/usr/local/cargo/git/db \
     --mount=type=cache,target=/usr/local/cargo/registry/ \
-cargo build --locked --release && \
-cp ./target/release/$APP_NAME /bin/server
+    cargo build --locked --release && \
+    cp ./target/release/ztop /bin/ztop && \
+    cp ./target/release/ztop-exporter /bin/ztop-exporter
 
 ################################################################################
 
@@ -50,6 +51,8 @@ RUN adduser \
     appuser
 USER appuser
 
-COPY --from=build /bin/server /bin/
+COPY --from=build /bin/ztop /bin/
+COPY --from=build /bin/ztop-exporter /bin/
 
-ENTRYPOINT ["/bin/server"]
+# Default to ztop-exporter; override with /bin/ztop for the TUI
+ENTRYPOINT ["/bin/ztop-exporter"]
