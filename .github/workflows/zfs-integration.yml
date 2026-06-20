@@ -1,0 +1,34 @@
+name: ZFS Integration Test
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - "**"
+
+jobs:
+  zfs-e2e:
+    name: ZFS end-to-end (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zfsutils-linux build-essential
+          sudo modprobe zfs
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run ZFS integration tests
+        run: sudo -E env "PATH=$PATH" bash scripts/integration-test-entrypoint.sh
